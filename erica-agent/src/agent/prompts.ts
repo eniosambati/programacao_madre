@@ -70,11 +70,13 @@ export function buildSystemPrompt(
   ultimaLoteria?: string | null,
   acumulados: Record<string, number> = {}
 ): string {
+  // Usa fuso horário de Brasília para evitar virada de dia incorreta (UTC-3)
   const now = new Date();
-  const hora = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-  const hoje = now.toLocaleDateString('pt-BR');
-  const hojeISO = now.toISOString().split('T')[0];
-  const horaNum = now.getHours();
+  const TZ = 'America/Sao_Paulo';
+  const hora = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
+  const hoje = now.toLocaleDateString('pt-BR', { timeZone: TZ });
+  const hojeISO = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(now); // formato YYYY-MM-DD
+  const horaNum = parseInt(new Intl.DateTimeFormat('pt-BR', { hour: 'numeric', hour12: false, timeZone: TZ }).format(now), 10);
   const saudacao = horaNum < 12 ? 'Bom dia' : horaNum < 18 ? 'Boa tarde' : 'Boa noite';
 
   const boloesConfirmados = sessao.boloes_confirmados;
