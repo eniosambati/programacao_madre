@@ -13,6 +13,18 @@ import type { MessageContext } from './types';
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
+// Libera CORS para o painel admin (Lovable e outros frontends)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
+  next();
+});
+
 const PORT = process.env.PORT || 3000;
 
 // ─── WEBHOOK PRINCIPAL ────────────────────────────────────────────────────────
