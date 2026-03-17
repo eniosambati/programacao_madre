@@ -1,178 +1,306 @@
-# Érica Agent — Chatbot de Vendas de Bolões
+# Érica Agent — Agente de Vendas de Bolões via WhatsApp
 
-Agente de atendimento via WhatsApp para a **Lotérica da Madre**, especializado em vendas de cotas de bolões de loteria com fluxo completo de upsell, reserva e pagamento via PIX.
+Agente de inteligência artificial para venda de bolões de loteria via WhatsApp, desenvolvido para a **Lotérica da Madre**. A Érica é uma vendedora virtual que atende clientes, apresenta bolões disponíveis, conduz o fluxo de venda com upsell/downsell, coleta dados do comprador, gera chave PIX e valida o comprovante de pagamento — tudo de forma automatizada via WhatsApp.
 
 ---
 
 ## Sumário
 
 - [Visão Geral](#visão-geral)
+- [Stack Tecnológica](#stack-tecnológica)
 - [Arquitetura](#arquitetura)
 - [Fluxo de Venda](#fluxo-de-venda)
-- [Estrutura de Pastas](#estrutura-de-pastas)
-- [Variáveis de Ambiente](#variáveis-de-ambiente)
+- [Estrutura de Arquivos](#estrutura-de-arquivos)
 - [Banco de Dados (Supabase)](#banco-de-dados-supabase)
-- [Tools (Ferramentas do Agente)](#tools-ferramentas-do-agente)
-- [Serviços Externos](#serviços-externos)
-- [Como Rodar Localmente](#como-rodar-localmente)
-- [Deploy no VPS](#deploy-no-vps)
-- [Comandos Especiais](#comandos-especiais)
-- [Painel Administrativo](#painel-administrativo)
-- [Observações Técnicas](#observações-técnicas)
+- [API — Endpoints](#api--endpoints)
+- [Tools da IA](#tools-da-ia)
+- [Variáveis de Ambiente](#variáveis-de-ambiente)
+- [Instalação e Execução](#instalação-e-execução)
+- [Deploy em Produção (VPS)](#deploy-em-produção-vps)
+- [Comandos de Administração](#comandos-de-administração)
+- [Histórico de Fixes](#histórico-de-fixes)
 
 ---
 
 ## Visão Geral
 
-A Érica é um agente de IA que atende clientes no WhatsApp e conduz o fluxo completo de venda de cotas de bolões:
+A Érica é uma IA que funciona como vendedora de bolões de loteria. Quando um cliente envia mensagem no WhatsApp da Lotérica da Madre, a Evolution API encaminha para o webhook da Érica, que processa a mensagem, consulta o banco de dados de bolões disponíveis e conduz a conversa de venda com personalidade humana e fluxo comercial estruturado.
 
-1. Se apresenta e pergunta se o cliente quer ver os acumulados do dia
-2. Busca bolões disponíveis no banco de dados
-3. Apresenta opções com acumulados
-4. Mostra a imagem do bilhete quando o cliente pedir
-5. Confirma a compra e conduz upsell/downsell
-6. Coleta dados pessoais e envia PIX
-7. Processa o comprovante de pagamento
-8. Atualiza o status do pedido para endosso manual
+**Capacidades principais:**
+- Apresentar bolões disponíveis com acumulados em tempo real
+- Enviar imagem do bilhete (jogos completos)
+- Conduzir upsell (mesma loteria, mais cotas) e downsell (outra loteria)
+- Coletar nome, WhatsApp e CPF do comprador com validação
+- Gerar instrução de pagamento via PIX (CNPJ)
+- Validar comprovante de pagamento por OCR (GPT-4o Vision)
+- Processar áudio (transcrição automática via Whisper)
+- Solicitar atendimento humano quando necessário
+- Detectar cliente retornante e retomar a sessão
 
-**Stack:** Node.js + TypeScript + Express + OpenAI GPT-4o + Supabase + Evolution API (WhatsApp)
+---
+
+## Stack Tecnológica
+
+| Tecnologia | Uso |
+|---|---|
+| **Node.js + TypeScript** | Runtime e linguagem principal |
+| **Express** | Servidor HTTP e webhook |
+| **OpenAI GPT-4o** | Agente de IA (tool calling), OCR de comprovante e bilhete, transcrição de áudio |
+| **Supabase** | Banco de dados principal (PostgreSQL) |
+| **Evolution API** | Integração com WhatsApp |
+| **Docker Swarm** | Orquestração em produção |
+| **Easypanel + Traefik** | Painel de deploy e proxy reverso na VPS |
 
 ---
 
 ## Arquitetura
 
 ```
-WhatsApp
-   |
-   | (webhook)
-   v
-Evolution API
-   |
-   | POST /webhook
-   v
-Express (src/server.ts)
-   |
-   | texto / imagem / áudio transcrito
-   v
-runErica (src/agent/erica.ts)
-   |
-   |-- buildSystemPrompt (src/agent/prompts.ts)
-   |-- getChatHistory (Supabase)
-   |-- getSessao (Supabase)
-   |-- OpenAI GPT-4o (tool_choice: auto)
-   |
-   |-- Tool Calling Loop
-   |   |-- buscar_boloes   -> src/tools/boloes.ts   -> Supabase (erica.boloes)
-   |   |-- mostrar_bilhete -> src/tools/cotas.ts    -> Supabase (erica.cotas)
-   |   |                   -> src/tools/imagens.ts  -> Supabase Storage + Evolution API
-   |   |-- confirmar_compra -> src/agent/erica.ts (lógica interna)
-   |   |-- fazer_reserva   -> src/tools/reservas.ts -> Supabase (pedidos + pedido_cotas)
-   |   |-- processar_comprovante -> src/tools/reservas.ts -> validação CNPJ + Supabase
-   |
-   v
-sendText / sendImage (src/services/whatsapp.ts)
-   |
-   v
-Evolution API -> WhatsApp (cliente)
+WhatsApp (cliente)
+       │
+       ▼
+Evolution API  ──►  POST /webhook  (Express)
+                          │
+                          ▼
+                    server.ts
+                    ├─ Filtra mensagens (fromMe, grupos, eventos)
+                    ├─ Detecta tipo de mídia (texto, imagem, áudio, PDF)
+                    ├─ Transcreve áudio (Whisper)
+                    ├─ OCR de imagem/PDF (GPT-4o Vision)
+                    └─ Chama runErica()
+                          │
+                          ▼
+                    agent/erica.ts  (loop principal)
+                    ├─ Carrega sessão do Supabase
+                    ├─ Carrega histórico de chat (últimas 30 msgs)
+                    ├─ Detecta fase da sessão
+                    ├─ Guards server-side (fechamento, upsell, etc.)
+                    ├─ Chama OpenAI com tool calling
+                    └─ Executa tools conforme necessário
+                          │
+            ┌─────────────┼─────────────┐
+            ▼             ▼             ▼
+        boloes.ts     cotas.ts    reservas.ts
+        (Supabase)  (Supabase)  (Supabase + PIX)
+                          │
+                          ▼
+                    sendText() / sendImage()
+                    (Evolution API → WhatsApp)
 ```
-
-### Princípio Zero RAM
-
-Todo o estado da conversa é persistido no **Supabase** — nunca em variáveis em memória. Isso permite reiniciar o servidor sem perder nenhuma sessão ativa.
 
 ---
 
 ## Fluxo de Venda
 
+O agente opera em **6 fases** controladas pela sessão no Supabase:
+
 ```
-[ABERTURA]
-  Apresentação + pergunta sobre acumulados
-        |
-        | cliente confirma
-        v
-[buscar_boloes] -> apresenta bolões disponíveis hoje
-        |
-        | cliente escolhe uma loteria
-        v
-[VENDA]
-  "Posso te mostrar o bilhete?"
-        |
-        | cliente confirma
-        v
-[mostrar_bilhete]
-  - Busca cota disponível no banco
-  - Envia imagem do bilhete via WhatsApp
-  "Quer garantir a sua cota?"
-        |
-        | cliente confirma
-        v
-[confirmar_compra]
-  Sistema verifica automaticamente:
-    -> Existe outro bolão da mesma loteria? -> [UPSELL]
-    -> Existe bolão de outra loteria?       -> [DOWNSELL]
-    -> Não há mais opções?                  -> [FECHAMENTO]
-        |
-        v
-[FECHAMENTO]
-  Revisão com total
-  Coleta: nome completo + CPF + telefone
-        |
-        v
-[fazer_reserva]
-  - Valida CPF
-  - Cria/atualiza cliente
-  - Cria pedido (status: aguardando_pagamento)
-  - Cria pedido_cota
-  - Marca cota como vendida
-  - Envia dados do PIX
-        |
-        | cliente envia comprovante (imagem ou texto)
-        v
-[processar_comprovante]
-  - GPT-4o extrai texto da imagem (Vision)
-  - Valida CNPJ: 10.519.294/0001-16
-  - Valida razão social: "madre"
-  - Atualiza pedidos para status: a_endossar
-        |
-        v
-[FIM] Endosso manual no painel administrativo
+abertura
+   │  Cliente envia primeira mensagem
+   │  Érica se apresenta e mostra acumulados
+   ▼
+venda
+   │  Érica lista bolões disponíveis
+   │  Cliente escolhe loteria
+   │  Érica envia imagem do bilhete
+   │  Cliente confirma ("quero", "pode", "fico", etc.)
+   ▼
+upsell
+   │  Érica oferece mais cotas da mesma loteria
+   │  SE aceitar → mostrar_bilhete → confirmar_compra
+   │  SE recusar → downsell
+   ▼
+downsell
+   │  Érica oferece bolão de outra loteria
+   │  SE aceitar → mostrar_bilhete → confirmar_compra
+   │  SE recusar → ir_para_fechamento
+   ▼
+fechamento
+   │  Servidor exibe revisão do carrinho
+   │  Coleta nome completo, WhatsApp com DDD, CPF
+   │  Valida CPF com algoritmo oficial
+   │  Gera instrução PIX com chave CNPJ
+   ▼
+aguardando_pagamento
+   │  Cliente envia comprovante (imagem ou texto)
+   │  OCR extrai dados do recebedor e CNPJ
+   │  Valida CNPJ da Lotérica da Madre
+   │  SE aprovado → reserva confirmada → reset de sessão
+   │  SE expirado (sorteio passado) → reset silencioso
 ```
 
 ---
 
-## Estrutura de Pastas
+## Estrutura de Arquivos
 
 ```
 erica-agent/
 ├── src/
-│   ├── server.ts              # Servidor Express — webhook principal
-│   ├── types.ts               # Interfaces TypeScript
 │   ├── agent/
-│   │   ├── erica.ts           # Loop principal do agente (tool calling)
-│   │   ├── prompts.ts         # System prompt dinâmico + lógica de retomada
-│   │   └── tools.ts           # Definição das tools para a OpenAI
+│   │   ├── erica.ts          # Agente principal — loop de tool calling
+│   │   ├── prompts.ts        # buildSystemPrompt + contexto por fase
+│   │   └── tools.ts          # Definição das tools para OpenAI
+│   │
+│   ├── tools/
+│   │   ├── boloes.ts         # toolBuscarBoloes — busca bolões ativos no Supabase
+│   │   ├── cotas.ts          # toolBuscarEscolherCota — seleciona cota disponível
+│   │   ├── imagens.ts        # toolEnviarImagem — envia bilhete via Evolution API
+│   │   ├── reservas.ts       # toolFazerReservas + toolProcessarComprovante
+│   │   └── humano.ts         # toolSolicitarHumano — transfere para atendente
+│   │
 │   ├── services/
-│   │   ├── openai.ts          # Cliente OpenAI (gpt-4o) + transcrição + visão
-│   │   ├── supabase.ts        # Queries ao banco (chat, leads, clientes, pedidos)
-│   │   ├── session.ts         # Estado da sessão (getSessao, saveSessao, etc.)
-│   │   └── whatsapp.ts        # sendText, sendImage, downloadMedia (Evolution API)
-│   └── tools/
-│       ├── boloes.ts          # Busca bolões disponíveis hoje (Supabase direto)
-│       ├── cotas.ts           # Busca e seleciona cota disponível
-│       ├── imagens.ts         # Busca imagem no Supabase Storage e envia via WhatsApp
-│       └── reservas.ts        # Criar pedidos, processar comprovante PIX
-├── .env                       # Variáveis de ambiente (não commitado)
-├── .gitignore
+│   │   ├── supabase.ts       # Clientes Supabase (schema public + erica)
+│   │   ├── session.ts        # Gestão de sessão (getSessao, saveSessao, etc.)
+│   │   ├── openai.ts         # Cliente OpenAI — OCR, Whisper, extractBilheteNumbers
+│   │   ├── coleta-dados.ts   # Parser de nome, telefone e CPF das mensagens
+│   │   └── whatsapp.ts       # sendText, sendImage, downloadMedia (Evolution API)
+│   │
+│   ├── scripts/
+│   │   └── atualizar-resultados.ts  # Cron que atualiza acumulados das loterias (6h)
+│   │
+│   ├── server.ts             # Servidor Express + webhook + endpoint /api/extrair-bilhete
+│   └── types.ts              # Interfaces TypeScript (MessageContext, Bolao, SessaoErica, etc.)
+│
+├── docs/
+│   └── sessao-11-03-2026.md  # Documentação de sessão de desenvolvimento
+│
+├── check_boloes.mjs          # Script para verificar bolões e cotas disponíveis
+├── test-bilhete.mjs          # Script para testar o endpoint /api/extrair-bilhete
+├── CHANGELOG.md              # Histórico de versões e fixes
 ├── package.json
 ├── tsconfig.json
-└── README.md
+└── .env                      # Variáveis de ambiente (não commitado)
 ```
+
+---
+
+## Banco de Dados (Supabase)
+
+O projeto usa dois schemas no mesmo projeto Supabase:
+
+### Schema `public`
+
+| Tabela | Descrição |
+|---|---|
+| `n8n_chat_histories` | Histórico de mensagens (`session_id`, `message` JSONB com `type` e `content`) |
+| `leads_madre` | Leads cadastrados (`whatsapp`, `nome`, `is_cliente`) |
+| `resultados_loterias` | Acumulados atualizados pelo cron (`loteria`, `acumulado`, `created_at`) |
+
+### Schema `erica`
+
+| Tabela | Descrição |
+|---|---|
+| `erica_sessoes` | Estado completo da sessão por cliente (fase, bolões confirmados, dados, etc.) |
+| `boloes` | Bolões cadastrados (`codigo`, `loteria_id`, `total_cotas`, `valor_cota`, `data_sorteio`, `status`, `jogos`) |
+| `cotas` | Cotas individuais de cada bolão (`proprietario='erica'`, `vendida`, `reservada`) |
+| `clientes` | Clientes com CPF validado (`nome`, `cpf`, `telefone`) |
+| `pedidos` | Pedidos de compra (`cliente_id`, `status`, `total`) |
+| `pedidos_cotas` | Relação pedido ↔ cota comprada |
+
+### Interface `SessaoErica`
+
+```typescript
+interface SessaoErica {
+  session_id: string;
+  fase: 'abertura' | 'venda' | 'upsell' | 'downsell' | 'fechamento' | 'aguardando_pagamento';
+  cota_selecionada: CotaSelecionada | null;
+  cotas_pre_selecionadas: Record<string, CotaSelecionada>;
+  boloes_confirmados: BolaoConfirmado[];
+  boloes_oferecidos: string[];           // códigos dos bolões já exibidos
+  boloes_disponiveis: Bolao[];
+  loterias_listadas: string[];
+  ultimo_bilhete_mostrado: string | null;
+  dados_cliente: DadosCliente | null;    // { nome, cpf, telefone }
+  pedidos_ids: string[];
+  ultima_atividade: string;
+}
+```
+
+---
+
+## API — Endpoints
+
+### `POST /webhook`
+Recebe mensagens do WhatsApp via Evolution API.
+
+**Suporte a tipos de mídia:**
+- `text` — mensagem de texto normal
+- `image` — imagem (comprovante PIX ou bilhete)
+- `audio` — áudio (transcrição via Whisper)
+- `document` — PDF (extração de texto)
+
+**Comandos especiais:**
+- `#reset` ou `!resetar` — limpa a sessão e o histórico do cliente
+
+**Fluxo interno:**
+1. Filtra mensagens enviadas pelo bot (`fromMe`) e eventos que não são mensagens
+2. Suporte a LID (novo modo de endereçamento WhatsApp)
+3. Detecta e baixa mídia se necessário
+4. Transcreve áudio ou extrai texto de imagem/PDF
+5. Registra lead no banco se novo cliente
+6. Chama `runErica()` com o contexto completo
+
+---
+
+### `POST /api/extrair-bilhete`
+Endpoint para o Painel Admin (Lovable) extrair dados de um bilhete por OCR.
+
+**Body:**
+```json
+{
+  "imageBase64": "data:image/jpeg;base64,..."
+}
+```
+
+**Response:**
+```json
+{
+  "sucesso": true,
+  "loteria": "Mega-Sena",
+  "concurso": "2850",
+  "total_cotas": 10,
+  "valor_cota": 23.62,
+  "jogos": [
+    ["01", "09", "23", "36", "44", "55"],
+    ["02", "10", "28", "37", "45", "56"]
+  ]
+}
+```
+
+---
+
+### `GET /`
+Health check — retorna `"Érica Agent online 🍀"`.
+
+---
+
+## Tools da IA
+
+A IA usa **tool calling** do OpenAI para executar ações estruturadas. Cada tool tem validações server-side que impedem uso indevido.
+
+| Tool | Descrição |
+|---|---|
+| `buscar_boloes` | Busca todos os bolões ativos com acumulados |
+| `listar_jogos_loteria` | Envia lista formatada de bolões de uma loteria específica |
+| `mostrar_bilhete` | Seleciona cota e envia imagem do bilhete |
+| `confirmar_compra` | Registra confirmação do cliente — valida frase e bilhete exibido |
+| `ir_para_fechamento` | Encerra vendas e inicia coleta de dados do comprador |
+| `limpar_carrinho` | Remove todos os bolões confirmados da sessão |
+| `processar_comprovante` | OCR do comprovante PIX e validação do CNPJ |
+| `solicitar_humano` | Pausa a IA e transfere para atendente humano |
+
+### Regras de segurança das tools
+
+- `confirmar_compra` só executa se o cliente usou palavra de confirmação explícita E o bilhete do bolão foi exibido antes (`ultimo_bilhete_mostrado`)
+- `ir_para_fechamento` só executa se há bolões confirmados no carrinho
+- Durante `fase=fechamento`, o servidor responde diretamente sem passar para a IA (100% server-side)
+- `processar_comprovante` valida o CNPJ `10.519.294/0001-16` da Lotérica da Madre
 
 ---
 
 ## Variáveis de Ambiente
 
-Crie o arquivo `.env` na raiz do projeto com as seguintes variáveis:
+Crie um arquivo `.env` na raiz do projeto:
 
 ```env
 # OpenAI
@@ -183,9 +311,9 @@ SUPABASE_URL=https://xxxxxxxxxxxx.supabase.co
 SUPABASE_SERVICE_KEY=eyJ...
 
 # Evolution API (WhatsApp)
-EVOLUTION_API_URL=https://wsapi.dev.lotericamadreia.com
+EVOLUTION_URL=https://sua-instancia.evolution.com
+EVOLUTION_INSTANCE=nome-da-instancia
 EVOLUTION_API_KEY=sua-api-key
-EVOLUTION_INSTANCE=loterica-madre
 
 # Servidor
 PORT=3000
@@ -193,335 +321,156 @@ PORT=3000
 
 ---
 
-## Banco de Dados (Supabase)
-
-### Schema `public`
-
-| Tabela | Descrição |
-|---|---|
-| `n8n_chat_histories` | Histórico de mensagens (session_id, message JSONB) |
-| `leads_madre` | Leads do WhatsApp (whatsapp, nomewpp, atendimento_ia) |
-| `resultados_loterias` | Acumulados das loterias (loteria, valor_acumulado, data_sorteio) |
-
-### Schema `erica`
-
-| Tabela | Descrição |
-|---|---|
-| `loterias` | Cadastro de loterias (id, nome, slug) |
-| `boloes` | Bolões disponíveis (codigo, loteria_id, total_cotas, valor_cota, data_sorteio, status, jogos[], imagem_bilhete_url) |
-| `cotas` | Cotas de cada bolão (bolao_id, numero, proprietario, vendida, reservada) |
-| `clientes` | Clientes cadastrados (nome, cpf, telefone) |
-| `pedidos` | Pedidos de compra (bolao_id, cliente_id, codigo, status) |
-| `pedido_cotas` | Relação pedido x cota (pedido_id, cota_id, numero_cota) |
-| `erica_sessoes` | Estado da conversa por cliente (session_id, fase, cota_selecionada, boloes_confirmados, etc.) |
-
-### Status de Pedidos
-
-| Status | Descrição |
-|---|---|
-| `aguardando_pagamento` | Reserva criada, aguardando PIX |
-| `a_endossar` | Comprovante validado, aguardando endosso manual |
-| `finalizado` | Endossado e concluído pelo painel |
-
-### Campo `atendimento_ia` (leads_madre)
-
-| Valor | Comportamento |
-|---|---|
-| `ativa` (padrão) | Érica responde normalmente |
-| `pause` | Érica ignora mensagens do cliente (atendimento humano) |
-| `reativada` | Érica volta a responder |
-
----
-
-## Tools (Ferramentas do Agente)
-
-### `buscar_boloes`
-Busca todos os bolões com `status = 'ativo'` e `data_sorteio = hoje` diretamente no Supabase.
-Salva a lista na sessão (`boloes_disponiveis`) para uso em toda a conversa.
-
-**Parâmetros:** `data_sorteio` (YYYY-MM-DD)
-
----
-
-### `mostrar_bilhete`
-Fluxo combinado em 3 etapas:
-1. Busca uma cota disponível (`proprietario = 'erica'`, `vendida = false`, `reservada = false`)
-2. Salva a cota na sessão (`cota_selecionada`)
-3. Baixa `imagem_bilhete_url` do bolão no Supabase Storage e envia via Evolution API
-
-**Parâmetros:** `loteria`, `total_cotas`, `data_sorteio`
-
----
-
-### `confirmar_compra`
-Registra o bolão como confirmado na sessão e detecta automaticamente a próxima fase:
-- Outro bolão da mesma loteria disponível → fase `upsell`
-- Bolão de outra loteria disponível → fase `downsell`
-- Nenhuma opção restante → fase `fechamento`
-
-**Parâmetros:** `loteria`, `total_cotas`, `valor_cota`, `data_sorteio`
-
----
-
-### `fazer_reserva`
-1. Valida CPF (algoritmo completo)
-2. Cria ou recupera cliente pelo CPF
-3. Para cada bolão confirmado: cria `pedido` + `pedido_cota`, marca cota como vendida
-4. Retorna dados do PIX para pagamento
-
-**Parâmetros:** `nome`, `cpf`, `telefone`
-
-**Chave PIX:** `lotericamadre@gmail.com` — **Lotérica da Madre**
-
----
-
-### `processar_comprovante`
-1. Extrai CNPJ do texto (com ou sem formatação)
-2. Valida contra CNPJ da Lotérica da Madre: `10.519.294/0001-16`
-3. Valida presença de "madre" no texto
-4. Atualiza todos os pedidos da sessão para `status = 'a_endossar'`
-
-**Parâmetros:** `texto` (extraído pelo GPT-4o Vision da imagem enviada pelo cliente)
-
----
-
-## Serviços Externos
-
-### OpenAI
-- **Modelo:** `gpt-4o`
-- **Uso:** chat (tool calling), transcrição de áudio (Whisper), extração de texto de imagens (Vision)
-- **Arquivo:** `src/services/openai.ts`
-
-### Supabase
-- **URL:** `https://ozfumjkluhyboxmtvjol.supabase.co`
-- **Schemas:** `public` (histórico, leads) e `erica` (bolões, cotas, pedidos)
-- **Arquivo:** `src/services/supabase.ts`
-
-### Evolution API
-- **URL:** `https://wsapi.dev.lotericamadreia.com`
-- **Instância:** `loterica-madre`
-- **Configuração importante:** `webhookBase64: true` — imagens chegam com base64 direto no payload, sem necessidade de download separado
-- **Arquivo:** `src/services/whatsapp.ts`
-
----
-
-## Como Rodar Localmente
+## Instalação e Execução
 
 ### Pré-requisitos
 - Node.js 18+
-- npm
-- Conta Supabase configurada
-- Acesso à Evolution API
-- Chave da OpenAI
+- npm ou yarn
+- Conta Supabase com schemas `public` e `erica` configurados
+- Instância Evolution API ativa
+- Chave de API OpenAI
 
 ### Instalação
 
 ```bash
-# Clone o repositório
-git clone https://github.com/cognusdigitalbr/programacao_madre.git
+# Clonar o repositório
+git clone https://github.com/eniosambati/programacao_madre.git
 cd programacao_madre/erica-agent
 
-# Instale as dependências
+# Instalar dependências
 npm install
 
-# Crie o arquivo .env com as variáveis (veja seção acima)
+# Configurar variáveis de ambiente
 cp .env.example .env
-# edite o .env com seus dados
+# Edite o .env com suas credenciais
+```
 
-# Inicie em modo desenvolvimento
+### Execução em desenvolvimento
+
+```bash
 npm run dev
 ```
 
-O servidor sobe na porta `3000` por padrão.
+O servidor inicia na porta `3000` (ou a definida em `PORT`).
 
-### Expor para a Internet (desenvolvimento)
-
-Use ngrok para receber webhooks da Evolution API localmente:
+### Build e execução em produção
 
 ```bash
-# Instale o ngrok
-# https://ngrok.com/download
-
-# Inicie o túnel (domínio estático recomendado)
-ngrok http 3000 --domain=seu-dominio-estatico.ngrok-free.dev
-```
-
-Configure o webhook na Evolution API apontando para:
-```
-https://seu-dominio.ngrok-free.dev/webhook
-```
-
-### Scripts disponíveis
-
-```bash
-npm run dev      # Desenvolvimento com nodemon + ts-node (hot reload)
-npm run build    # Compila TypeScript para dist/
-npm run start    # Produção (requer npm run build antes)
+npm run build
+npm start
 ```
 
 ---
 
-## Deploy no VPS
+## Deploy em Produção (VPS)
 
-### Pré-requisitos no servidor
-- Ubuntu 20.04+ ou Debian 11+
-- Node.js 18+ instalado
-- PM2 instalado globalmente: `npm install -g pm2`
-- Git instalado
+O projeto roda em uma VPS Hostinger com Docker Swarm + Easypanel.
 
-### Passo a passo
+**Informações da VPS:**
+- IP: `147.79.106.232`
+- Infra: Docker Swarm + Easypanel + Traefik
+- Arquivo `.env` na VPS: `/opt/erica-agent/.env`
+
+### Fluxo de deploy
+
+1. Fazer alterações localmente
+2. Commit e push para o GitHub:
+```bash
+git add erica-agent/
+git commit -m "fix: descrição do fix"
+git push origin main
+```
+3. Na VPS, atualizar o serviço:
+```bash
+docker service update --force erica-agent
+```
+
+> **Importante:** Use sempre `docker service update --force` — nunca `docker restart`. O Swarm gerencia o rolling update sem downtime.
+
+### Ver logs em tempo real
 
 ```bash
-# 1. Clonar o repositório
-git clone https://github.com/cognusdigitalbr/programacao_madre.git /opt/erica-agent
-cd /opt/erica-agent/erica-agent
-
-# 2. Instalar dependências
-npm install
-
-# 3. Criar arquivo .env
-nano .env
-# preencha todas as variáveis
-
-# 4. Build de produção
-npm run build
-
-# 5. Iniciar com PM2
-pm2 start dist/server.js --name erica-agent
-
-# 6. Configurar para reiniciar no boot
-pm2 startup
-pm2 save
-
-# 7. Monitorar logs
-pm2 logs erica-agent
+docker service logs erica-agent --tail 50 -f
 ```
 
-### Atualizar após mudanças no código
+### Verificar status do serviço
 
 ```bash
-cd /opt/erica-agent/erica-agent
-git pull origin main
-npm install
-npm run build
-pm2 restart erica-agent
-```
-
-### Configurar domínio (opcional)
-
-Use Nginx como proxy reverso:
-
-```nginx
-server {
-    listen 80;
-    server_name erica.seudominio.com.br;
-
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-```
-
-Após configurar o Nginx, atualize o webhook na Evolution API para:
-```
-https://erica.seudominio.com.br/webhook
+docker service ls
+docker service ps erica-agent
 ```
 
 ---
 
-## Comandos Especiais
+## Comandos de Administração
 
-Enviados via WhatsApp pelo cliente ou pelo operador:
+### Via WhatsApp (cliente)
 
 | Comando | Ação |
 |---|---|
-| `#reset` | Apaga a sessão e o histórico de chat do cliente |
-| `!resetar` | Mesmo que `#reset` |
+| `#reset` | Limpa sessão e histórico do cliente |
+| `!resetar` | Mesmo efeito que `#reset` |
 
-Esses comandos são úteis para forçar um recomeço de conversa durante testes ou quando o atendimento travar.
+### Scripts locais
+
+```bash
+# Verificar bolões e cotas disponíveis no Supabase
+node check_boloes.mjs
+
+# Testar endpoint de OCR do bilhete
+node test-bilhete.mjs
+
+# Atualizar acumulados das loterias manualmente
+npx ts-node src/scripts/atualizar-resultados.ts
+```
+
+### Cron de acumulados
+
+O script `atualizar-resultados.ts` roda automaticamente a cada 6 horas via cron configurado no servidor. Ele busca os resultados atuais das loterias na API da Caixa Econômica (via mirror Heroku) e atualiza a tabela `resultados_loterias` no Supabase.
 
 ---
 
 ## Painel Administrativo
 
-O painel frontend está no repositório:
-```
-https://github.com/cognusdigitalbr/painel-adm-erica
-```
+O projeto possui um painel web desenvolvido em **Lovable** para cadastro e gestão de bolões.
 
-Funcionalidades do painel:
-- Visualizar pedidos por status (`aguardando_pagamento`, `a_endossar`, `finalizado`)
-- Endossar pedidos manualmente
-- Visualizar leads e clientes
-- Pausar/reativar a IA para um número específico (campo `atendimento_ia`)
+- **Repositório:** `https://github.com/cognusdigitalbr/painel-adm-erica`
+- **Funcionalidade principal:** Cadastro de bolão em 3 etapas:
+  1. **Dados Básicos** — loteria, data do sorteio, número de cotas, valor
+  2. **Jogos (OCR IA)** — escaneia o bilhete físico com IA e extrai as dezenas automaticamente
+  3. **Distribuição** — distribui as cotas entre os vendedores
 
-### Pausar IA para atendimento humano
-
-Para pausar a Érica para um cliente específico, atualize diretamente no Supabase:
-
-```sql
-UPDATE public.leads_madre
-SET atendimento_ia = 'pause'
-WHERE whatsapp = '5543991415354';
-```
-
-Para reativar:
-
-```sql
-UPDATE public.leads_madre
-SET atendimento_ia = 'ativa'
-WHERE whatsapp = '5543991415354';
-```
+O painel se comunica com o backend via:
+- `POST /api/extrair-bilhete` — OCR do bilhete
+- Supabase diretamente (schema `erica`)
 
 ---
 
-## Observações Técnicas
+## Histórico de Fixes
 
-### Sessão Zero RAM
-Todo o estado é armazenado na tabela `erica.erica_sessoes`. Campos principais:
+| Fix | Descrição |
+|---|---|
+| fix-bug54 | Trava do carrinho durante fase de fechamento |
+| fix-bug55 | Mensagem PIX sem prefixo técnico de cota |
+| fix-bug56 | OCR comprovante não extrai valor (evita rejeição incorreta) |
+| fix-bug57 | Parser de telefone com 12 dígitos e DDD válido |
+| fix-bug58 | Feedback server-side para dados inválidos (CPF, nome, tel) |
+| fix-bug59 | Confirmação progressiva ao salvar nome/telefone |
+| fix-bug60 | Fechamento 100% server-side com catch-all |
+| fix-bug61 | Cliente retornante + lembrete PIX + reset após comprovante aprovado |
+| fix-bug62 | Remove loterias sem bolão ativo da lista inicial |
+| fix-bug63-65 | Correção de SyntaxErrors (newlines corrompidas em strings) |
+| fix-bug66 | Guard `lista_enviada` no loop de tools (evita resposta duplicada) |
+| fix-bug67-68 | Remove guard que causava loop ao reiniciar container |
+| fix-bug69 | `detectarPedidoMultiplasCotas` não interpreta números soltos como cotas |
 
-```typescript
-{
-  session_id: string;           // remoteJid do WhatsApp
-  fase: string;                 // abertura | venda | upsell | downsell | fechamento | aguardando_pagamento
-  boloes_disponiveis: Bolao[];  // lista retornada por buscar_boloes
-  boloes_oferecidos: string[];  // chaves "loteria:cotas" já mostradas
-  boloes_confirmados: BolaoConfirmado[]; // bolões que o cliente confirmou
-  cota_selecionada: CotaSelecionada;     // cota reservada para o cliente atual
-  dados_cliente: DadosCliente;           // nome, cpf, telefone
-  pedidos_ids: string[];                 // IDs dos pedidos criados
-}
-```
-
-### Endereçamento LID (WhatsApp)
-Alguns números chegam com `@lid` no `remoteJid` (novo formato de endereçamento do WhatsApp). O servidor tenta usar `remoteJidAlt` como fallback. Mensagens com `@lid` sem alternativa são descartadas.
-
-### webhookBase64
-A Evolution API está configurada com `webhookBase64: true`. Isso significa que imagens chegam com o campo `data.message.base64` preenchido diretamente no payload do webhook, sem necessidade de chamar a API para download. O servidor verifica esse campo primeiro antes de tentar o download manual.
-
-### Histórico de Chat
-O histórico de conversas é salvo na tabela `public.n8n_chat_histories` no formato compatível com o LangChain (campo `message` como JSONB com `type` e `content`). Os últimos 30 mensagens são carregados a cada requisição.
-
-### Imagens dos Bolões
-As imagens dos bilhetes são salvas no **Supabase Storage** e o link é armazenado no campo `imagem_bilhete_url` da tabela `erica.boloes`. A tool `mostrar_bilhete` baixa a imagem, converte para base64 e envia via Evolution API.
-
-### CNPJ da Lotérica da Madre
-```
-10.519.294/0001-16
-Razão Social: Loterica da Madre Ltda
-```
-O comprovante é validado pelo CNPJ + presença da palavra "madre" no texto extraído.
+Detalhes completos: ver `CHANGELOG.md`
 
 ---
 
-## Informações do Projeto
+## Empresa
 
-- **Empresa:** MMX Empreendimentos Digitais
-- **Cliente:** Lotérica da Madre
-- **Repositório:** `https://github.com/cognusdigitalbr/programacao_madre`
-- **Pasta no repo:** `erica-agent/`
+**Lotérica da Madre Ltda**
+CNPJ: 10.519.294/0001-16
+
+**Desenvolvido por:** MMX Empreendimentos Digitais
